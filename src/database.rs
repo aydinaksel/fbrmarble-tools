@@ -38,22 +38,22 @@ pub async fn connect(
 }
 
 const PURCHASE_ORDER_QUERY: &str = "SELECT
-    po.ItemCode AS SKU_NUMBER,
-    po.FreeTxt AS DESCRIPTION,
-    whs.WhsName AS WAREHOUSE_NAME,
-    'SPECIAL ORDER' AS LOCATION_STOCKTYPE,
-    so.CardName AS CUSTOMER,
+    CAST(po.ItemCode AS NVARCHAR(MAX)) AS SKU_NUMBER,
+    CAST(po.FreeTxt AS NVARCHAR(MAX)) AS DESCRIPTION,
+    CAST(whs.WhsName AS NVARCHAR(MAX)) AS WAREHOUSE_NAME,
+    CAST('SPECIAL ORDER' AS NVARCHAR(MAX)) AS LOCATION_STOCKTYPE,
+    CAST(so.CardName AS NVARCHAR(MAX)) AS CUSTOMER,
     CASE
         WHEN po.U_TRC_LNum IS NOT NULL
-        THEN (SELECT TOP 1 Substitute FROM OSCN WHERE ItemCode = po.ItemCode AND CardCode = so.CardCode)
+        THEN CAST((SELECT TOP 1 Substitute FROM OSCN WHERE ItemCode = po.ItemCode AND CardCode = so.CardCode) AS NVARCHAR(MAX))
         ELSE NULL
     END AS CUSTOMER_SKU,
-    po.CountryOrg AS ORIGIN,
+    CAST(po.CountryOrg AS NVARCHAR(MAX)) AS ORIGIN,
     poh.TaxDate AS DATE,
-    itm.U_ses_sqfCrates AS SQUARE_FOOTAGE_PER_CRATE,
-    po.U_ses_Crates AS NUMBER_OF_CRATES,
-    itm.U_TRC_PkSz AS PIECES_PER_CRATE,
-    itm.U_weight_crate AS WEIGHT_PER_CRATE_LBS
+    CAST(itm.U_ses_sqfCrates AS FLOAT) AS SQUARE_FOOTAGE_PER_CRATE,
+    CAST(po.U_ses_Crates AS FLOAT) AS NUMBER_OF_CRATES,
+    CAST(itm.U_TRC_PkSz AS NVARCHAR(MAX)) AS PIECES_PER_CRATE,
+    CAST(itm.U_weight_crate AS NVARCHAR(MAX)) AS WEIGHT_PER_CRATE_LBS
 FROM
     POR1 AS po
     LEFT JOIN OWHS AS whs ON po.WhsCode = whs.WhsCode
