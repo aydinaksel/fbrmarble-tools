@@ -41,8 +41,10 @@ version = "0.7"
 features = ["compat"]
 optional = true
 
-[dependencies.lopdf]
-version = "0.34"
+[dependencies.printpdf]
+version = "0.9.1"
+default-features = false
+features = ["png"]
 optional = true
 
 [dependencies.dotenvy]
@@ -100,7 +102,7 @@ ssr = [
     "dep:tokio",
     "dep:tiberius",
     "dep:tokio-util",
-    "dep:lopdf",
+    "dep:printpdf",
     "dep:dotenvy",
     "dep:tower",
     "dep:tower-http",

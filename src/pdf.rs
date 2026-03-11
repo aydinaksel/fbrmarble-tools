@@ -1,38 +1,39 @@
 use chrono::NaiveDateTime;
-use lopdf::{
-    content::{Content, Operation},
-    dictionary, Document, Object, ObjectId, Stream,
+use printpdf::{
+    Color, Line, LinePoint, Mm, Op, PaintMode, ParsedFont, PdfDocument, PdfFontHandle, PdfPage,
+    PdfSaveOptions, Point, Polygon, PolygonRing, Pt, RawImage, Rgb, TextItem, WindingOrder,
+    XObjectId, XObjectTransform,
 };
 
 use crate::database::PurchaseOrderLine;
 
-// Landscape A4 in points (1 inch = 72 pt)
-const PAGE_WIDTH_PT: f32 = 841.89;
-const PAGE_HEIGHT_PT: f32 = 595.28;
-const MARGIN_PT: f32 = 36.0; // 0.5 inch
+const REGULAR_TTF: &[u8] = include_bytes!(
+    "../atkinson-hyperlegible-next-mono/fonts/ttf/AtkinsonHyperlegibleMono-Regular.ttf"
+);
+const BOLD_TTF: &[u8] = include_bytes!(
+    "../atkinson-hyperlegible-next-mono/fonts/ttf/AtkinsonHyperlegibleMono-Bold.ttf"
+);
+const LOGO_PNG: &[u8] = include_bytes!("../fbr_logo.png");
 
-const CONTENT_WIDTH_PT: f32 = PAGE_WIDTH_PT - 2.0 * MARGIN_PT;
-const CONTENT_HEIGHT_PT: f32 = PAGE_HEIGHT_PT - 2.0 * MARGIN_PT;
+const PAGE_WIDTH_MM: f32 = 297.0;
+const PAGE_HEIGHT_MM: f32 = 210.0;
 
-const HEADER_BAR_HEIGHT_PT: f32 = 43.2; // 0.60 inch
-const BOTTOM_ROW_HEIGHT_PT: f32 = 120.24; // 1.67 inches
-const DISCLAIMER_WIDTH_PT: f32 = CONTENT_WIDTH_PT * 3.0 / 4.0;
-const CRATE_NUMBER_WIDTH_PT: f32 = CONTENT_WIDTH_PT - DISCLAIMER_WIDTH_PT;
+// Advance width fraction for Atkinson Hyperlegible Mono (632/1000 em)
+const CHAR_ADVANCE_FRACTION: f32 = 0.632;
 
-const SKU_ROW_HEIGHT_PT: f32 = 86.4; // 1.2 inches
-const DESCRIPTION_ROW_HEIGHT_PT: f32 = 72.0; // 1.0 inch
-const CUSTOMER_ROW_HEIGHT_PT: f32 = 64.8; // 0.9 inches
-const DETAILS_ROW_HEIGHT_PT: f32 = 64.8; // 0.9 inches
-const QUANTITY_ROW_HEIGHT_PT: f32 = CONTENT_HEIGHT_PT
-    - HEADER_BAR_HEIGHT_PT
-    - BOTTOM_ROW_HEIGHT_PT
-    - SKU_ROW_HEIGHT_PT
-    - DESCRIPTION_ROW_HEIGHT_PT
-    - CUSTOMER_ROW_HEIGHT_PT
-    - DETAILS_ROW_HEIGHT_PT;
+// Font sizes as stored in the SVG (user units = mm)
+const HEADER_LABEL_SIZE_MM: f32 = 4.23333;
+const VALUE_SIZE_MM: f32 = 7.05556;
+const DISCLAIMER_SIZE_MM: f32 = 3.52778;
 
-const CELL_HEADER_HEIGHT_PT: f32 = 15.84; // 0.22 inch
-const CELL_PADDING_PT: f32 = 5.76; // 0.08 inch
+// #bfbfbf = 191/255
+const HEADER_BACKGROUND_GRAY: f32 = 191.0 / 255.0;
+
+// Logo PNG is 320×317 px; displayed at 40×40 mm
+const LOGO_PNG_WIDTH_PX: f32 = 320.0;
+const LOGO_PNG_HEIGHT_PX: f32 = 317.0;
+const LOGO_DISPLAY_MM: f32 = 40.0;
+const LOGO_DPI: f32 = 300.0;
 
 pub struct CrateLabel {
     pub sku_number: String,
@@ -94,519 +95,277 @@ fn format_whole_number(value: Option<&str>) -> String {
 }
 
 pub fn generate_pdf(labels: &[CrateLabel]) -> Vec<u8> {
-    let mut doc = Document::with_version("1.5");
+    let regular_font =
+        ParsedFont::from_bytes(REGULAR_TTF, 0, &mut Vec::new()).expect("regular TTF parse failed");
+    let bold_font =
+        ParsedFont::from_bytes(BOLD_TTF, 0, &mut Vec::new()).expect("bold TTF parse failed");
+    let logo_image =
+        RawImage::decode_from_bytes(LOGO_PNG, &mut Vec::new()).expect("logo PNG decode failed");
 
-    let helvetica_id = doc.add_object(dictionary! {
-        "Type" => "Font",
-        "Subtype" => "Type1",
-        "BaseFont" => "Helvetica",
-        "Encoding" => "WinAnsiEncoding",
-    });
-    let helvetica_bold_id = doc.add_object(dictionary! {
-        "Type" => "Font",
-        "Subtype" => "Type1",
-        "BaseFont" => "Helvetica-Bold",
-        "Encoding" => "WinAnsiEncoding",
-    });
-    let helvetica_oblique_id = doc.add_object(dictionary! {
-        "Type" => "Font",
-        "Subtype" => "Type1",
-        "BaseFont" => "Helvetica-Oblique",
-        "Encoding" => "WinAnsiEncoding",
-    });
+    let mut doc = PdfDocument::new("FBR Marble Crate Labels");
+    let regular_id = doc.add_font(&regular_font);
+    let bold_id = doc.add_font(&bold_font);
+    let logo_id = doc.add_image(&logo_image);
 
-    let pages_id = doc.new_object_id();
+    let regular = PdfFontHandle::External(regular_id);
+    let bold = PdfFontHandle::External(bold_id);
 
-    let page_ids: Vec<Object> = labels
+    let pages: Vec<PdfPage> = labels
         .iter()
         .map(|label| {
-            add_label_page(
-                &mut doc,
-                label,
-                pages_id,
-                helvetica_id,
-                helvetica_bold_id,
-                helvetica_oblique_id,
-            )
-            .into()
+            let ops = build_page_ops(label, &regular, &bold, &logo_id);
+            PdfPage::new(Mm(PAGE_WIDTH_MM), Mm(PAGE_HEIGHT_MM), ops)
         })
         .collect();
 
-    let page_count = page_ids.len() as i64;
-    doc.objects.insert(
-        pages_id,
-        Object::Dictionary(dictionary! {
-            "Type" => "Pages",
-            "Kids" => page_ids,
-            "Count" => page_count,
-        }),
-    );
-
-    let catalog_id = doc.add_object(dictionary! {
-        "Type" => "Catalog",
-        "Pages" => pages_id,
-    });
-    doc.trailer.set("Root", catalog_id);
-
-    let mut bytes = Vec::new();
-    doc.save_to(&mut bytes).unwrap();
-    bytes
+    doc.with_pages(pages)
+        .save(&PdfSaveOptions::default(), &mut Vec::new())
 }
 
-fn add_label_page(
-    doc: &mut Document,
+fn build_page_ops(
     label: &CrateLabel,
-    pages_id: ObjectId,
-    regular_id: ObjectId,
-    bold_id: ObjectId,
-    oblique_id: ObjectId,
-) -> ObjectId {
-    let resources_id = doc.add_object(dictionary! {
-        "Font" => dictionary! {
-            "F1" => regular_id,
-            "F2" => bold_id,
-            "F3" => oblique_id,
-        },
-    });
-
-    let operations = build_label_operations(label);
-    let content = Content { operations };
-    let content_stream = Stream::new(dictionary! {}, content.encode().unwrap());
-    let content_id = doc.add_object(content_stream);
-
-    doc.add_object(dictionary! {
-        "Type" => "Page",
-        "Parent" => pages_id,
-        "MediaBox" => vec![
-            Object::Integer(0),
-            Object::Integer(0),
-            Object::Real(PAGE_WIDTH_PT),
-            Object::Real(PAGE_HEIGHT_PT),
-        ],
-        "Resources" => resources_id,
-        "Contents" => content_id,
-    })
-}
-
-// Converts a y coordinate from top-down layout to PDF bottom-up.
-// Returns the bottom edge of the element in PDF coordinates.
-fn pdf_y(top_y_pt: f32, height_pt: f32) -> f32 {
-    PAGE_HEIGHT_PT - top_y_pt - height_pt
-}
-
-fn build_label_operations(label: &CrateLabel) -> Vec<Operation> {
-    let mut ops: Vec<Operation> = Vec::new();
-
-    let origin_x = MARGIN_PT;
-    let origin_y = MARGIN_PT;
-
-    // ── Header bar ──────────────────────────────────────────────────────────
-    filled_rect(
-        &mut ops,
-        origin_x,
-        origin_y,
-        CONTENT_WIDTH_PT,
-        HEADER_BAR_HEIGHT_PT,
-        (0.941, 0.941, 0.941),
-    );
-    stroked_rect(
-        &mut ops,
-        origin_x,
-        origin_y,
-        CONTENT_WIDTH_PT,
-        HEADER_BAR_HEIGHT_PT,
-    );
-
-    // Logo placeholder box
-    let logo_width = 160.0_f32;
-    let logo_padding = 5.76_f32;
-    filled_rect(
-        &mut ops,
-        origin_x + logo_padding,
-        origin_y + logo_padding,
-        logo_width,
-        HEADER_BAR_HEIGHT_PT - 2.0 * logo_padding,
-        (0.784, 0.784, 0.784),
-    );
-    place_text(
-        &mut ops,
-        "[ COMPANY LOGO ]",
-        "F3",
-        8.0,
-        origin_x + CELL_PADDING_PT,
-        origin_y + HEADER_BAR_HEIGHT_PT / 2.0 - 3.0,
-        (0.392, 0.392, 0.392),
-    );
-
-    let mut row_y = origin_y + HEADER_BAR_HEIGHT_PT;
-
-    // ── Row 1: SKU ───────────────────────────────────────────────────────────
-    draw_table_cell(
-        &mut ops,
-        origin_x,
-        row_y,
-        CONTENT_WIDTH_PT,
-        SKU_ROW_HEIGHT_PT,
-        "SKU NUMBER",
-        &label.sku_number.to_uppercase(),
-        24.0,
-    );
-    row_y += SKU_ROW_HEIGHT_PT;
-
-    // ── Row 2: Description ───────────────────────────────────────────────────
-    draw_table_cell(
-        &mut ops,
-        origin_x,
-        row_y,
-        CONTENT_WIDTH_PT,
-        DESCRIPTION_ROW_HEIGHT_PT,
-        "DESCRIPTION",
-        &label.description.to_uppercase(),
-        13.0,
-    );
-    row_y += DESCRIPTION_ROW_HEIGHT_PT;
-
-    // ── Row 3: Customer | Customer SKU ───────────────────────────────────────
-    let half_width = CONTENT_WIDTH_PT / 2.0;
-    draw_table_cell(
-        &mut ops,
-        origin_x,
-        row_y,
-        half_width,
-        CUSTOMER_ROW_HEIGHT_PT,
-        "CUSTOMER",
-        &label.customer.to_uppercase(),
-        13.0,
-    );
-    draw_table_cell(
-        &mut ops,
-        origin_x + half_width,
-        row_y,
-        half_width,
-        CUSTOMER_ROW_HEIGHT_PT,
-        "CUSTOMER SKU",
-        &label.customer_sku.to_uppercase(),
-        13.0,
-    );
-    row_y += CUSTOMER_ROW_HEIGHT_PT;
-
-    // ── Row 4: Origin | Warehouse | Stock Type | Date ────────────────────────
-    let quarter_width = CONTENT_WIDTH_PT / 4.0;
-    draw_table_cell(
-        &mut ops,
-        origin_x,
-        row_y,
-        quarter_width,
-        DETAILS_ROW_HEIGHT_PT,
-        "ORIGIN",
-        &label.origin.to_uppercase(),
-        11.0,
-    );
-    draw_table_cell(
-        &mut ops,
-        origin_x + quarter_width,
-        row_y,
-        quarter_width,
-        DETAILS_ROW_HEIGHT_PT,
-        "WAREHOUSE",
-        &label.warehouse_name.to_uppercase(),
-        11.0,
-    );
-    draw_table_cell(
-        &mut ops,
-        origin_x + 2.0 * quarter_width,
-        row_y,
-        quarter_width,
-        DETAILS_ROW_HEIGHT_PT,
-        "STOCK TYPE",
-        &label.location_stock_type.to_uppercase(),
-        11.0,
-    );
-    let date_text = label.date.format("%-d %B %Y").to_string().to_uppercase();
-    draw_table_cell(
-        &mut ops,
-        origin_x + 3.0 * quarter_width,
-        row_y,
-        quarter_width,
-        DETAILS_ROW_HEIGHT_PT,
-        "DATE",
-        &date_text,
-        11.0,
-    );
-    row_y += DETAILS_ROW_HEIGHT_PT;
-
-    // ── Row 5: Quantity | Pieces | Weight ────────────────────────────────────
-    let third_width = CONTENT_WIDTH_PT / 3.0;
-    draw_table_cell(
-        &mut ops,
-        origin_x,
-        row_y,
-        third_width,
-        QUANTITY_ROW_HEIGHT_PT,
-        "QUANTITY PER CRATE",
-        &label.square_footage_per_crate,
-        22.0,
-    );
-    draw_table_cell(
-        &mut ops,
-        origin_x + third_width,
-        row_y,
-        third_width,
-        QUANTITY_ROW_HEIGHT_PT,
-        "PIECES PER CRATE",
-        &label.pieces_per_crate,
-        22.0,
-    );
-    draw_table_cell(
-        &mut ops,
-        origin_x + 2.0 * third_width,
-        row_y,
-        third_width,
-        QUANTITY_ROW_HEIGHT_PT,
-        "WEIGHT PER CRATE",
-        &format!("{} LBS", label.weight_per_crate_lbs),
-        22.0,
-    );
-    row_y += QUANTITY_ROW_HEIGHT_PT;
-
-    // ── Row 6: Disclaimer | Crate Number ─────────────────────────────────────
-    draw_disclaimer_cell(&mut ops, origin_x, row_y, DISCLAIMER_WIDTH_PT, BOTTOM_ROW_HEIGHT_PT);
-    draw_crate_number_cell(
-        &mut ops,
-        origin_x + DISCLAIMER_WIDTH_PT,
-        row_y,
-        CRATE_NUMBER_WIDTH_PT,
-        BOTTOM_ROW_HEIGHT_PT,
-        label.crate_number,
-    );
-
+    regular: &PdfFontHandle,
+    bold: &PdfFontHandle,
+    logo_id: &XObjectId,
+) -> Vec<Op> {
+    let mut ops = Vec::new();
+    draw_header_backgrounds(&mut ops);
+    draw_grid(&mut ops);
+    draw_logo(&mut ops, logo_id);
+    draw_all_text(label, &mut ops, regular, bold);
     ops
 }
 
-fn draw_table_cell(
-    ops: &mut Vec<Operation>,
-    x: f32,
-    top_y: f32,
-    width: f32,
-    height: f32,
-    header: &str,
-    value: &str,
-    value_size_pt: f32,
-) {
-    stroked_rect(ops, x, top_y, width, height);
+// ── Header background fills ───────────────────────────────────────────────────
 
-    filled_rect(
-        ops,
-        x,
-        top_y,
-        width,
-        CELL_HEADER_HEIGHT_PT,
-        (0.824, 0.824, 0.824),
-    );
+fn draw_header_backgrounds(ops: &mut Vec<Op>) {
+    let gray = gray(HEADER_BACKGROUND_GRAY);
 
-    // Header label — baseline just above bottom of header band
-    place_text(
-        ops,
-        header,
-        "F1",
-        7.0,
-        x + CELL_PADDING_PT,
-        top_y + CELL_HEADER_HEIGHT_PT - 4.5,
-        (0.196, 0.196, 0.196),
-    );
+    // Row 1: SKU NUMBER | DESCRIPTION | ORIGIN  (y=10..20)
+    fill_rect(ops, 11.0, 10.0, 40.0, 10.0, gray.clone());
+    fill_rect(ops, 51.0, 10.0, 210.0, 10.0, gray.clone());
+    fill_rect(ops, 261.0, 10.0, 25.0, 10.0, gray.clone());
 
-    // Value: centred vertically in the area below the header band
-    let value_area_top = top_y + CELL_HEADER_HEIGHT_PT;
-    let value_area_height = height - CELL_HEADER_HEIGHT_PT;
-    // Approximate text height as 70% of point size
-    let approx_text_height = value_size_pt * 0.7;
-    let baseline_y = value_area_top + (value_area_height - approx_text_height) / 2.0 + approx_text_height;
+    // Row 2: CUSTOMER | CUSTOMER SKU  (y=45..55)
+    fill_rect(ops, 11.0, 45.0, 185.0, 10.0, gray.clone());
+    fill_rect(ops, 196.0, 45.0, 90.0, 10.0, gray.clone());
 
-    place_text(
-        ops,
-        value,
-        "F2",
-        value_size_pt,
-        x + CELL_PADDING_PT,
-        baseline_y,
-        (0.0, 0.0, 0.0),
-    );
+    // Row 3: WAREHOUSE | STOCK TYPE | DATE  (y=80..90)
+    fill_rect(ops, 11.0, 80.0, 100.0, 10.0, gray.clone());
+    fill_rect(ops, 111.0, 80.0, 95.0, 10.0, gray.clone());
+    fill_rect(ops, 206.0, 80.0, 80.0, 10.0, gray.clone());
+
+    // Row 4: QUANTITY IN CRATE | PIECES IN CRATE | WEIGHT OF CRATE | CRATE NUMBER  (y=115..125)
+    fill_rect(ops, 11.0, 115.0, 65.0, 10.0, gray.clone());
+    fill_rect(ops, 76.0, 115.0, 70.0, 10.0, gray.clone());
+    fill_rect(ops, 146.0, 115.0, 70.0, 10.0, gray.clone());
+    fill_rect(ops, 216.0, 115.0, 70.0, 10.0, gray.clone());
+
+    // Row 5: DISCLAIMER  (y=150..160)
+    fill_rect(ops, 11.0, 150.0, 225.0, 10.0, gray);
 }
 
-fn draw_disclaimer_cell(
-    ops: &mut Vec<Operation>,
-    x: f32,
-    top_y: f32,
-    width: f32,
-    height: f32,
+// ── Grid lines ────────────────────────────────────────────────────────────────
+
+fn draw_grid(ops: &mut Vec<Op>) {
+    ops.push(Op::SetOutlineColor {
+        col: black(),
+    });
+    ops.push(Op::SetOutlineThickness { pt: Pt(0.5) });
+
+    // Outer border
+    draw_line(ops, 11.0, 10.0, 11.0, 200.0);
+    draw_line(ops, 286.0, 10.0, 286.0, 200.0);
+    draw_line(ops, 11.0, 10.0, 286.0, 10.0);
+    draw_line(ops, 11.0, 200.0, 286.0, 200.0);
+
+    // Internal horizontals
+    draw_line(ops, 11.0, 45.0, 286.0, 45.0);
+    draw_line(ops, 11.0, 80.0, 286.0, 80.0);
+    draw_line(ops, 11.0, 115.0, 286.0, 115.0);
+    draw_line(ops, 11.0, 150.0, 286.0, 150.0);
+
+    // Row 1 verticals
+    draw_line(ops, 51.0, 10.0, 51.0, 45.0);
+    draw_line(ops, 261.0, 10.0, 261.0, 45.0);
+
+    // Row 2 vertical
+    draw_line(ops, 196.0, 45.0, 196.0, 80.0);
+
+    // Row 3 verticals
+    draw_line(ops, 111.0, 80.0, 111.0, 115.0);
+    draw_line(ops, 206.0, 80.0, 206.0, 115.0);
+
+    // Row 4 verticals
+    draw_line(ops, 76.0, 115.0, 76.0, 150.0);
+    draw_line(ops, 146.0, 115.0, 146.0, 150.0);
+    draw_line(ops, 216.0, 115.0, 216.0, 150.0);
+
+    // Row 5 vertical
+    draw_line(ops, 236.0, 150.0, 236.0, 200.0);
+}
+
+// ── Logo ──────────────────────────────────────────────────────────────────────
+
+fn draw_logo(ops: &mut Vec<Op>, logo_id: &XObjectId) {
+    // SVG position: x=241, y=155 (top-down), w=40, h=40
+    // PDF bottom-left: x=241mm, y=210-155-40=15mm
+    let native_width_mm = LOGO_PNG_WIDTH_PX * 25.4 / LOGO_DPI;
+    let native_height_mm = LOGO_PNG_HEIGHT_PX * 25.4 / LOGO_DPI;
+    let scale_x = LOGO_DISPLAY_MM / native_width_mm;
+    let scale_y = LOGO_DISPLAY_MM / native_height_mm;
+
+    ops.push(Op::UseXobject {
+        id: logo_id.clone(),
+        transform: XObjectTransform {
+            translate_x: Some(Pt(241.0 * 72.0 / 25.4)),
+            translate_y: Some(Pt(15.0 * 72.0 / 25.4)),
+            scale_x: Some(scale_x),
+            scale_y: Some(scale_y),
+            dpi: Some(LOGO_DPI),
+            rotate: None,
+        },
+    });
+}
+
+// ── All text ──────────────────────────────────────────────────────────────────
+
+fn draw_all_text(
+    label: &CrateLabel,
+    ops: &mut Vec<Op>,
+    regular: &PdfFontHandle,
+    bold: &PdfFontHandle,
 ) {
-    stroked_rect(ops, x, top_y, width, height);
-    filled_rect(ops, x, top_y, width, CELL_HEADER_HEIGHT_PT, (0.824, 0.824, 0.824));
+    // Row 1 — header labels
+    left_text(ops, "SKU NUMBER",  17.614212, 16.413929, regular, HEADER_LABEL_SIZE_MM);
+    left_text(ops, "DESCRIPTION", 141.28918, 16.413929, regular, HEADER_LABEL_SIZE_MM);
+    left_text(ops, "ORIGIN",      265.5477,  16.41394,  regular, HEADER_LABEL_SIZE_MM);
 
-    place_text(
-        ops,
-        "DISCLAIMER",
-        "F1",
-        7.0,
-        x + CELL_PADDING_PT,
-        top_y + CELL_HEADER_HEIGHT_PT - 4.5,
-        (0.196, 0.196, 0.196),
-    );
+    // Row 1 — data values
+    centered_text(ops, &label.sku_number.to_uppercase(),  30.340418, 34.91534, bold, VALUE_SIZE_MM);
+    centered_text(ops, &label.description.to_uppercase(), 155.59077, 34.91534, bold, VALUE_SIZE_MM);
+    centered_text(ops, &label.origin.to_uppercase(),      273.13312, 35.0,     bold, VALUE_SIZE_MM);
 
-    let disclaimer = "This label is intended solely for the use of the named recipient and contains confidential \
-information pertaining to the shipment of goods. The contents of this crate have been packed and verified \
-in accordance with the applicable purchase order. Any discrepancies in quantity, condition, or identity of \
-goods must be reported immediately to the warehouse manager upon receipt. Unauthorised reproduction or \
-distribution of this label is strictly prohibited. FBR Marble accepts no liability for errors arising from \
-illegible or damaged labels.";
+    // Row 2 — header labels
+    left_text(ops, "CUSTOMER",     92.810844, 51.413925, regular, HEADER_LABEL_SIZE_MM);
+    left_text(ops, "CUSTOMER SKU", 224.99377, 51.413929, regular, HEADER_LABEL_SIZE_MM);
 
-    let max_chars_per_line = ((width - 2.0 * CELL_PADDING_PT) / 4.2) as usize;
-    let lines = wrap_text(disclaimer, max_chars_per_line);
-    let line_height_pt = 9.5_f32;
-    let text_start_y = top_y + CELL_HEADER_HEIGHT_PT + line_height_pt + 2.0;
+    // Row 2 — data values
+    centered_text(ops, &label.customer.to_uppercase(),     102.76622, 69.804832, bold, VALUE_SIZE_MM);
+    centered_text(ops, &label.customer_sku.to_uppercase(), 240.27325, 69.797783, bold, VALUE_SIZE_MM);
 
-    for (index, line) in lines.iter().enumerate() {
-        let line_y = text_start_y + index as f32 * line_height_pt;
-        if line_y + line_height_pt > top_y + height {
-            break;
-        }
-        place_text(
-            ops,
-            line,
-            "F1",
-            7.5,
-            x + CELL_PADDING_PT,
-            line_y,
-            (0.235, 0.235, 0.235),
-        );
+    // Row 3 — header labels
+    left_text(ops, "WAREHOUSE",  49.121277, 86.413933, regular, HEADER_LABEL_SIZE_MM);
+    left_text(ops, "STOCK TYPE", 145.17348, 86.413933, regular, HEADER_LABEL_SIZE_MM);
+    left_text(ops, "DATE",       240.67871, 86.41394,  regular, HEADER_LABEL_SIZE_MM);
+
+    // Row 3 — data values
+    let date_text = label.date.format("%-d %B %Y").to_string().to_uppercase();
+    centered_text(ops, &label.warehouse_name.to_uppercase(),      60.753056, 104.91534, bold, VALUE_SIZE_MM);
+    centered_text(ops, &label.location_stock_type.to_uppercase(), 158.17545, 104.91534, bold, VALUE_SIZE_MM);
+    centered_text(ops, &date_text,                                 245.5414,  104.80484, bold, VALUE_SIZE_MM);
+
+    // Row 4 — header labels
+    left_text(ops, "QUANTITY IN CRATE", 20.858034, 121.41181, regular, HEADER_LABEL_SIZE_MM);
+    left_text(ops, "PIECES IN CRATE",   90.898033, 121.41393, regular, HEADER_LABEL_SIZE_MM);
+    left_text(ops, "WEIGHT OF CRATE",   161.09489, 121.41393, regular, HEADER_LABEL_SIZE_MM);
+    left_text(ops, "CRATE NUMBER",      234.95992, 121.41393, regular, HEADER_LABEL_SIZE_MM);
+
+    // Row 4 — data values
+    let weight_text = format!("{} LBS", label.weight_per_crate_lbs);
+    centered_text(ops, &label.square_footage_per_crate,    43.034294, 139.90121, bold, VALUE_SIZE_MM);
+    centered_text(ops, &label.pieces_per_crate,            110.74601, 139.80484, bold, VALUE_SIZE_MM);
+    centered_text(ops, &weight_text,                       180.56961, 139.91534, bold, VALUE_SIZE_MM);
+    centered_text(ops, &label.crate_number.to_string(),    250.9612,  139.91534, bold, VALUE_SIZE_MM);
+
+    // Row 5 — disclaimer header label
+    left_text(ops, "DISCLAIMER", 15.690967, 156.41394, regular, HEADER_LABEL_SIZE_MM);
+
+    // Row 5 — disclaimer body (pre-wrapped lines taken verbatim from SVG)
+    let disclaimer_lines: &[(&str, f32)] = &[
+        ("This label is intended solely for the use of the named recipient and contains confidential", 167.52942),
+        ("information pertaining to the shipment of goods. The contents of this crate have been packed and", 172.46831),
+        ("verified in accordance with the applicable purchase order. Any discrepancies in quantity,", 177.4072),
+        ("condition, or identity of goods must be reported immediately to the warehouse manager upon", 182.34609),
+        ("receipt. Unauthorised reproduction or distribution of this label is strictly prohibited. FBR", 187.28498),
+        ("Marble accepts no liability for errors arising from illegible or damaged labels.", 192.22387),
+    ];
+    for (line, svg_y) in disclaimer_lines {
+        left_text(ops, line, 15.813029, *svg_y, regular, DISCLAIMER_SIZE_MM);
     }
 }
 
-fn draw_crate_number_cell(
-    ops: &mut Vec<Operation>,
-    x: f32,
-    top_y: f32,
-    width: f32,
-    height: f32,
-    crate_number: usize,
-) {
-    stroked_rect(ops, x, top_y, width, height);
-    filled_rect(ops, x, top_y, width, CELL_HEADER_HEIGHT_PT, (0.824, 0.824, 0.824));
+// ── Drawing primitives ────────────────────────────────────────────────────────
 
-    place_text(
-        ops,
-        "CRATE NUMBER",
-        "F1",
-        7.0,
-        x + CELL_PADDING_PT,
-        top_y + CELL_HEADER_HEIGHT_PT - 4.5,
-        (0.196, 0.196, 0.196),
-    );
-
-    let number_size = 38.0_f32;
-    let value_area_top = top_y + CELL_HEADER_HEIGHT_PT;
-    let value_area_height = height - CELL_HEADER_HEIGHT_PT;
-    let approx_text_height = number_size * 0.7;
-    let baseline_y = value_area_top + (value_area_height - approx_text_height) / 2.0 + approx_text_height;
-
-    let text = crate_number.to_string();
-    // Approximate centering: Helvetica-Bold digit width ≈ 0.6 × size
-    let approx_text_width = text.len() as f32 * number_size * 0.6;
-    let centered_x = x + (width - approx_text_width) / 2.0;
-
-    place_text(ops, &text, "F2", number_size, centered_x, baseline_y, (0.0, 0.0, 0.0));
+fn fill_rect(ops: &mut Vec<Op>, x_mm: f32, y_top_svg_mm: f32, w_mm: f32, h_mm: f32, color: Color) {
+    let y_bottom_pdf_mm = PAGE_HEIGHT_MM - y_top_svg_mm - h_mm;
+    ops.push(Op::SetFillColor { col: color });
+    ops.push(Op::DrawPolygon {
+        polygon: Polygon {
+            rings: vec![PolygonRing {
+                points: vec![
+                    LinePoint { p: Point::new(Mm(x_mm),        Mm(y_bottom_pdf_mm)),        bezier: false },
+                    LinePoint { p: Point::new(Mm(x_mm + w_mm), Mm(y_bottom_pdf_mm)),        bezier: false },
+                    LinePoint { p: Point::new(Mm(x_mm + w_mm), Mm(y_bottom_pdf_mm + h_mm)), bezier: false },
+                    LinePoint { p: Point::new(Mm(x_mm),        Mm(y_bottom_pdf_mm + h_mm)), bezier: false },
+                ],
+            }],
+            mode: PaintMode::Fill,
+            winding_order: WindingOrder::NonZero,
+        },
+    });
 }
 
-// ── PDF drawing primitives ───────────────────────────────────────────────────
-
-fn filled_rect(
-    ops: &mut Vec<Operation>,
-    x: f32,
-    top_y: f32,
-    width: f32,
-    height: f32,
-    rgb: (f32, f32, f32),
-) {
-    let bottom = pdf_y(top_y, height);
-    ops.extend([
-        Operation::new("q", vec![]),
-        Operation::new("rg", vec![rgb.0.into(), rgb.1.into(), rgb.2.into()]),
-        Operation::new("re", vec![x.into(), bottom.into(), width.into(), height.into()]),
-        Operation::new("f", vec![]),
-        Operation::new("Q", vec![]),
-    ]);
+fn draw_line(ops: &mut Vec<Op>, x1_mm: f32, y1_svg_mm: f32, x2_mm: f32, y2_svg_mm: f32) {
+    ops.push(Op::DrawLine {
+        line: Line {
+            points: vec![
+                LinePoint { p: Point::new(Mm(x1_mm), Mm(PAGE_HEIGHT_MM - y1_svg_mm)), bezier: false },
+                LinePoint { p: Point::new(Mm(x2_mm), Mm(PAGE_HEIGHT_MM - y2_svg_mm)), bezier: false },
+            ],
+            is_closed: false,
+        },
+    });
 }
 
-fn stroked_rect(ops: &mut Vec<Operation>, x: f32, top_y: f32, width: f32, height: f32) {
-    let bottom = pdf_y(top_y, height);
-    ops.extend([
-        Operation::new("q", vec![]),
-        Operation::new("RG", vec![0.0_f32.into(), 0.0_f32.into(), 0.0_f32.into()]),
-        Operation::new("w", vec![Object::Real(0.5)]),
-        Operation::new("re", vec![x.into(), bottom.into(), width.into(), height.into()]),
-        Operation::new("S", vec![]),
-        Operation::new("Q", vec![]),
-    ]);
-}
-
-/// Places a single line of text. `baseline_top_y` is measured from the top of the page
-/// down to the text baseline.
-fn place_text(
-    ops: &mut Vec<Operation>,
+fn left_text(
+    ops: &mut Vec<Op>,
     text: &str,
-    font_name: &str,
-    size_pt: f32,
-    x: f32,
-    baseline_top_y: f32,
-    rgb: (f32, f32, f32),
+    x_mm: f32,
+    baseline_svg_y_mm: f32,
+    font: &PdfFontHandle,
+    size_mm: f32,
 ) {
-    let baseline_pdf_y = PAGE_HEIGHT_PT - baseline_top_y;
-    let safe_text = escape_pdf_string(text);
+    let y_pdf_mm = PAGE_HEIGHT_MM - baseline_svg_y_mm;
+    let size_pt = size_mm * 72.0 / 25.4;
     ops.extend([
-        Operation::new("q", vec![]),
-        Operation::new("rg", vec![rgb.0.into(), rgb.1.into(), rgb.2.into()]),
-        Operation::new("BT", vec![]),
-        Operation::new("Tf", vec![Object::Name(font_name.as_bytes().to_vec()), Object::Real(size_pt)]),
-        Operation::new("Tm", vec![
-            1.0_f32.into(), 0.0_f32.into(),
-            0.0_f32.into(), 1.0_f32.into(),
-            x.into(), baseline_pdf_y.into(),
-        ]),
-        Operation::new("Tj", vec![Object::String(safe_text, lopdf::StringFormat::Literal)]),
-        Operation::new("ET", vec![]),
-        Operation::new("Q", vec![]),
+        Op::SetFillColor { col: black() },
+        Op::StartTextSection,
+        Op::SetTextCursor { pos: Point::new(Mm(x_mm), Mm(y_pdf_mm)) },
+        Op::SetFont { font: font.clone(), size: Pt(size_pt) },
+        Op::SetLineHeight { lh: Pt(size_pt) },
+        Op::ShowText { items: vec![TextItem::Text(text.to_string())] },
+        Op::EndTextSection,
     ]);
 }
 
-fn escape_pdf_string(text: &str) -> Vec<u8> {
-    let mut result = Vec::with_capacity(text.len());
-    for byte in text.bytes() {
-        match byte {
-            b'(' => { result.push(b'\\'); result.push(b'('); }
-            b')' => { result.push(b'\\'); result.push(b')'); }
-            b'\\' => { result.push(b'\\'); result.push(b'\\'); }
-            other => result.push(other),
-        }
-    }
-    result
+fn centered_text(
+    ops: &mut Vec<Op>,
+    text: &str,
+    center_x_mm: f32,
+    baseline_svg_y_mm: f32,
+    font: &PdfFontHandle,
+    size_mm: f32,
+) {
+    let text_width_mm = text.len() as f32 * CHAR_ADVANCE_FRACTION * size_mm;
+    let x_mm = center_x_mm - text_width_mm / 2.0;
+    left_text(ops, text, x_mm, baseline_svg_y_mm, font, size_mm);
 }
 
-fn wrap_text(text: &str, max_chars: usize) -> Vec<String> {
-    let mut lines = Vec::new();
-    let mut current = String::new();
-    for word in text.split_whitespace() {
-        if current.is_empty() {
-            current = word.to_string();
-        } else if current.len() + 1 + word.len() <= max_chars {
-            current.push(' ');
-            current.push_str(word);
-        } else {
-            lines.push(current.clone());
-            current = word.to_string();
-        }
-    }
-    if !current.is_empty() {
-        lines.push(current);
-    }
-    lines
+fn black() -> Color {
+    Color::Rgb(Rgb { r: 0.0, g: 0.0, b: 0.0, icc_profile: None })
+}
+
+fn gray(value: f32) -> Color {
+    Color::Rgb(Rgb { r: value, g: value, b: value, icc_profile: None })
 }
