@@ -1,28 +1,33 @@
 use chrono::NaiveDateTime;
 use printpdf::{
-    Color, Line, LinePoint, Mm, Op, PaintMode, ParsedFont, PdfDocument, PdfFontHandle, PdfPage,
-    PdfSaveOptions, Point, Polygon, PolygonRing, Pt, RawImage, Rgb, TextItem, WindingOrder,
-    XObjectId, XObjectTransform,
+    BuiltinFont, Color, Line, LinePoint, Mm, Op, PaintMode, /*ParsedFont,*/ PdfDocument,
+    PdfFontHandle, PdfPage, PdfSaveOptions, Point, Polygon, PolygonRing, Pt, RawImage, Rgb,
+    TextItem, WindingOrder, XObjectId, XObjectTransform,
 };
 
 use crate::database::PurchaseOrderLine;
 
-const REGULAR_TTF: &[u8] =
-    include_bytes!("../fonts/AtkinsonHyperlegibleMono-Regular.ttf");
-const BOLD_TTF: &[u8] =
-    include_bytes!("../fonts/AtkinsonHyperlegibleMono-Bold.ttf");
+// const REGULAR_TTF: &[u8] = include_bytes!("../fonts/AtkinsonHyperlegibleMono-Regular.ttf");
+// const BOLD_TTF: &[u8] = include_bytes!("../fonts/AtkinsonHyperlegibleMono-Bold.ttf");
+// const REGULAR_OTF: &[u8] = include_bytes!(
+//     "../atkinson-hyperlegible-next-mono/fonts/otf/AtkinsonHyperlegibleMono-Regular.otf"
+// );
+// const BOLD_OTF: &[u8] = include_bytes!(
+//     "../atkinson-hyperlegible-next-mono/fonts/otf/AtkinsonHyperlegibleMono-Bold.otf"
+// );
 const LOGO_PNG: &[u8] = include_bytes!("../fbr_logo.png");
 
 const PAGE_WIDTH_MM: f32 = 297.0;
 const PAGE_HEIGHT_MM: f32 = 210.0;
 
-// Advance width fraction for Atkinson Hyperlegible Mono (632/1000 em)
-const CHAR_ADVANCE_FRACTION: f32 = 0.632;
+// Advance width fraction for Courier (600/1000 em — fixed-width)
+const CHAR_ADVANCE_FRACTION: f32 = 0.6;
 
 // Font sizes as stored in the SVG (user units = mm)
 const HEADER_LABEL_SIZE_MM: f32 = 4.23333;
 const VALUE_SIZE_MM: f32 = 7.05556;
 const DISCLAIMER_SIZE_MM: f32 = 3.52778;
+const CRATE_NUMBER_SIZE_MM: f32 = 15.0;
 
 // #bfbfbf = 191/255
 const HEADER_BACKGROUND_GRAY: f32 = 191.0 / 255.0;
@@ -45,12 +50,12 @@ pub struct CrateLabel {
     pub square_footage_per_crate: String,
     pub pieces_per_crate: String,
     pub weight_per_crate_lbs: String,
-    pub crate_number: usize,
+    pub crate_number: String,
 }
 
 pub fn expand_to_crate_labels(lines: Vec<PurchaseOrderLine>) -> Vec<CrateLabel> {
     let mut labels = Vec::new();
-    for line in lines {
+    for (line_index, line) in lines.into_iter().enumerate() {
         let Some(number_of_crates) = line.number_of_crates else {
             continue;
         };
@@ -58,6 +63,7 @@ pub fn expand_to_crate_labels(lines: Vec<PurchaseOrderLine>) -> Vec<CrateLabel> 
             continue;
         }
         let crate_count = number_of_crates.round() as usize;
+        let line_letter = (b'A' + (line_index % 26) as u8) as char;
         for crate_number in 1..=crate_count {
             labels.push(CrateLabel {
                 sku_number: line.sku_number.clone(),
@@ -71,7 +77,7 @@ pub fn expand_to_crate_labels(lines: Vec<PurchaseOrderLine>) -> Vec<CrateLabel> 
                 square_footage_per_crate: format_square_footage(line.square_footage_per_crate),
                 pieces_per_crate: format_whole_number(line.pieces_per_crate.as_deref()),
                 weight_per_crate_lbs: format_whole_number(line.weight_per_crate_lbs.as_deref()),
-                crate_number,
+                crate_number: format!("{}-{}", line_letter, crate_number),
             });
         }
     }
@@ -93,20 +99,20 @@ fn format_whole_number(value: Option<&str>) -> String {
 }
 
 pub fn generate_pdf(labels: &[CrateLabel]) -> Vec<u8> {
-    let regular_font =
-        ParsedFont::from_bytes(REGULAR_TTF, 0, &mut Vec::new()).expect("regular TTF parse failed");
-    let bold_font =
-        ParsedFont::from_bytes(BOLD_TTF, 0, &mut Vec::new()).expect("bold TTF parse failed");
+    // let regular_font = ParsedFont::from_bytes(REGULAR_TTF, 0, &mut Vec::new())
+    //     .expect("regular TTF parse failed");
+    // let bold_font = ParsedFont::from_bytes(BOLD_TTF, 0, &mut Vec::new())
+    //     .expect("bold TTF parse failed");
     let logo_image =
         RawImage::decode_from_bytes(LOGO_PNG, &mut Vec::new()).expect("logo PNG decode failed");
 
     let mut doc = PdfDocument::new("FBR Marble Crate Labels");
-    let regular_id = doc.add_font(&regular_font);
-    let bold_id = doc.add_font(&bold_font);
+    // let regular_id = doc.add_font(&regular_font);
+    // let bold_id = doc.add_font(&bold_font);
     let logo_id = doc.add_image(&logo_image);
 
-    let regular = PdfFontHandle::External(regular_id);
-    let bold = PdfFontHandle::External(bold_id);
+    let regular = PdfFontHandle::Builtin(BuiltinFont::Courier);
+    let bold = PdfFontHandle::Builtin(BuiltinFont::CourierBold);
 
     let pages: Vec<PdfPage> = labels
         .iter()
@@ -166,9 +172,7 @@ fn draw_header_backgrounds(ops: &mut Vec<Op>) {
 // ── Grid lines ────────────────────────────────────────────────────────────────
 
 fn draw_grid(ops: &mut Vec<Op>) {
-    ops.push(Op::SetOutlineColor {
-        col: black(),
-    });
+    ops.push(Op::SetOutlineColor { col: black() });
     ops.push(Op::SetOutlineThickness { pt: Pt(0.5) });
 
     // Outer border
@@ -235,49 +239,203 @@ fn draw_all_text(
     bold: &PdfFontHandle,
 ) {
     // Row 1 — header labels
-    left_text(ops, "SKU NUMBER",  17.614212, 16.413929, regular, HEADER_LABEL_SIZE_MM);
-    left_text(ops, "DESCRIPTION", 141.28918, 16.413929, regular, HEADER_LABEL_SIZE_MM);
-    left_text(ops, "ORIGIN",      265.5477,  16.41394,  regular, HEADER_LABEL_SIZE_MM);
+    left_text(
+        ops,
+        "SKU NUMBER",
+        17.614212,
+        16.413929,
+        regular,
+        HEADER_LABEL_SIZE_MM,
+    );
+    left_text(
+        ops,
+        "DESCRIPTION",
+        141.28918,
+        16.413929,
+        regular,
+        HEADER_LABEL_SIZE_MM,
+    );
+    left_text(
+        ops,
+        "ORIGIN",
+        265.5477,
+        16.41394,
+        regular,
+        HEADER_LABEL_SIZE_MM,
+    );
 
     // Row 1 — data values
-    centered_text(ops, &label.sku_number.to_uppercase(),  30.340418, 34.91534, bold, VALUE_SIZE_MM);
-    centered_text(ops, &label.description.to_uppercase(), 155.59077, 34.91534, bold, VALUE_SIZE_MM);
-    centered_text(ops, &label.origin.to_uppercase(),      273.13312, 35.0,     bold, VALUE_SIZE_MM);
+    centered_text(
+        ops,
+        &label.sku_number.to_uppercase(),
+        30.340418,
+        34.91534,
+        bold,
+        VALUE_SIZE_MM,
+    );
+    draw_description(ops, &label.description.to_uppercase(), bold);
+    centered_text(
+        ops,
+        &label.origin.to_uppercase(),
+        273.13312,
+        35.0,
+        bold,
+        VALUE_SIZE_MM,
+    );
 
     // Row 2 — header labels
-    left_text(ops, "CUSTOMER",     92.810844, 51.413925, regular, HEADER_LABEL_SIZE_MM);
-    left_text(ops, "CUSTOMER SKU", 224.99377, 51.413929, regular, HEADER_LABEL_SIZE_MM);
+    left_text(
+        ops,
+        "CUSTOMER",
+        92.810844,
+        51.413925,
+        regular,
+        HEADER_LABEL_SIZE_MM,
+    );
+    left_text(
+        ops,
+        "CUSTOMER SKU",
+        224.99377,
+        51.413929,
+        regular,
+        HEADER_LABEL_SIZE_MM,
+    );
 
     // Row 2 — data values
-    centered_text(ops, &label.customer.to_uppercase(),     102.76622, 69.804832, bold, VALUE_SIZE_MM);
-    centered_text(ops, &label.customer_sku.to_uppercase(), 240.27325, 69.797783, bold, VALUE_SIZE_MM);
+    centered_text(
+        ops,
+        &label.customer.to_uppercase(),
+        102.76622,
+        69.804832,
+        bold,
+        VALUE_SIZE_MM,
+    );
+    centered_text(
+        ops,
+        &label.customer_sku.to_uppercase(),
+        240.27325,
+        69.797783,
+        bold,
+        VALUE_SIZE_MM,
+    );
 
     // Row 3 — header labels
-    left_text(ops, "WAREHOUSE",  49.121277, 86.413933, regular, HEADER_LABEL_SIZE_MM);
-    left_text(ops, "STOCK TYPE", 145.17348, 86.413933, regular, HEADER_LABEL_SIZE_MM);
-    left_text(ops, "DATE",       240.67871, 86.41394,  regular, HEADER_LABEL_SIZE_MM);
+    left_text(
+        ops,
+        "WAREHOUSE",
+        49.121277,
+        86.413933,
+        regular,
+        HEADER_LABEL_SIZE_MM,
+    );
+    left_text(
+        ops,
+        "STOCK TYPE",
+        145.17348,
+        86.413933,
+        regular,
+        HEADER_LABEL_SIZE_MM,
+    );
+    left_text(
+        ops,
+        "DATE",
+        240.67871,
+        86.41394,
+        regular,
+        HEADER_LABEL_SIZE_MM,
+    );
 
     // Row 3 — data values
     let date_text = label.date.format("%-d %B %Y").to_string().to_uppercase();
-    centered_text(ops, &label.warehouse_name.to_uppercase(),      60.753056, 104.91534, bold, VALUE_SIZE_MM);
-    centered_text(ops, &label.location_stock_type.to_uppercase(), 158.17545, 104.91534, bold, VALUE_SIZE_MM);
-    centered_text(ops, &date_text,                                 245.5414,  104.80484, bold, VALUE_SIZE_MM);
+    centered_text(
+        ops,
+        &label.warehouse_name.to_uppercase(),
+        60.753056,
+        104.91534,
+        bold,
+        VALUE_SIZE_MM,
+    );
+    centered_text(
+        ops,
+        &label.location_stock_type.to_uppercase(),
+        158.17545,
+        104.91534,
+        bold,
+        VALUE_SIZE_MM,
+    );
+    centered_text(ops, &date_text, 245.5414, 104.80484, bold, VALUE_SIZE_MM);
 
     // Row 4 — header labels
-    left_text(ops, "QUANTITY IN CRATE", 20.858034, 121.41181, regular, HEADER_LABEL_SIZE_MM);
-    left_text(ops, "PIECES IN CRATE",   90.898033, 121.41393, regular, HEADER_LABEL_SIZE_MM);
-    left_text(ops, "WEIGHT OF CRATE",   161.09489, 121.41393, regular, HEADER_LABEL_SIZE_MM);
-    left_text(ops, "CRATE NUMBER",      234.95992, 121.41393, regular, HEADER_LABEL_SIZE_MM);
+    left_text(
+        ops,
+        "QUANTITY IN CRATE",
+        20.858034,
+        121.41181,
+        regular,
+        HEADER_LABEL_SIZE_MM,
+    );
+    left_text(
+        ops,
+        "PIECES IN CRATE",
+        90.898033,
+        121.41393,
+        regular,
+        HEADER_LABEL_SIZE_MM,
+    );
+    left_text(
+        ops,
+        "WEIGHT OF CRATE",
+        161.09489,
+        121.41393,
+        regular,
+        HEADER_LABEL_SIZE_MM,
+    );
+    left_text(
+        ops,
+        "CRATE NUMBER",
+        234.95992,
+        121.41393,
+        regular,
+        HEADER_LABEL_SIZE_MM,
+    );
 
     // Row 4 — data values
     let weight_text = format!("{} LBS", label.weight_per_crate_lbs);
-    centered_text(ops, &label.square_footage_per_crate,    43.034294, 139.90121, bold, VALUE_SIZE_MM);
-    centered_text(ops, &label.pieces_per_crate,            110.74601, 139.80484, bold, VALUE_SIZE_MM);
-    centered_text(ops, &weight_text,                       180.56961, 139.91534, bold, VALUE_SIZE_MM);
-    centered_text(ops, &label.crate_number.to_string(),    250.9612,  139.91534, bold, VALUE_SIZE_MM);
+    centered_text(
+        ops,
+        &label.square_footage_per_crate,
+        43.034294,
+        139.90121,
+        bold,
+        VALUE_SIZE_MM,
+    );
+    centered_text(
+        ops,
+        &label.pieces_per_crate,
+        110.74601,
+        139.80484,
+        bold,
+        VALUE_SIZE_MM,
+    );
+    centered_text(ops, &weight_text, 180.56961, 139.91534, bold, VALUE_SIZE_MM);
+    centered_text(
+        ops,
+        &label.crate_number,
+        250.9612,
+        142.636,
+        bold,
+        CRATE_NUMBER_SIZE_MM,
+    );
 
     // Row 5 — disclaimer header label
-    left_text(ops, "DISCLAIMER", 15.690967, 156.41394, regular, HEADER_LABEL_SIZE_MM);
+    left_text(
+        ops,
+        "DISCLAIMER",
+        15.690967,
+        156.41394,
+        regular,
+        HEADER_LABEL_SIZE_MM,
+    );
 
     // Row 5 — disclaimer body (pre-wrapped lines taken verbatim from SVG)
     let disclaimer_lines: &[(&str, f32)] = &[
@@ -293,6 +451,63 @@ fn draw_all_text(
     }
 }
 
+// ── Description cell with optional text wrapping ─────────────────────────────
+
+fn draw_description(ops: &mut Vec<Op>, description: &str, bold: &PdfFontHandle) {
+    // Description cell data area: x=51..261 (210mm), y_svg=20..45 (25mm)
+    // Center x = 155.59077; single-line vertical baseline = y_svg 34.91534
+    const CENTER_X_MM: f32 = 155.59077;
+    const SINGLE_LINE_BASELINE_SVG_Y: f32 = 34.91534;
+    const MAX_WIDTH_MM: f32 = 190.0;
+    let line_spacing_mm = VALUE_SIZE_MM * 1.4;
+
+    let text_width_mm = description.len() as f32 * CHAR_ADVANCE_FRACTION * VALUE_SIZE_MM;
+    if text_width_mm <= MAX_WIDTH_MM {
+        centered_text(
+            ops,
+            description,
+            CENTER_X_MM,
+            SINGLE_LINE_BASELINE_SVG_Y,
+            bold,
+            VALUE_SIZE_MM,
+        );
+        return;
+    }
+
+    let max_chars_per_line =
+        (MAX_WIDTH_MM / (CHAR_ADVANCE_FRACTION * VALUE_SIZE_MM)).floor() as usize;
+    let lines = wrap_text(description, max_chars_per_line);
+
+    let first_baseline_svg_y =
+        SINGLE_LINE_BASELINE_SVG_Y - ((lines.len() - 1) as f32 * line_spacing_mm) / 2.0;
+
+    for (index, line) in lines.iter().enumerate() {
+        let baseline_y = first_baseline_svg_y + index as f32 * line_spacing_mm;
+        centered_text(ops, line, CENTER_X_MM, baseline_y, bold, VALUE_SIZE_MM);
+    }
+}
+
+fn wrap_text(text: &str, max_chars: usize) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut current_line = String::new();
+
+    for word in text.split_whitespace() {
+        if current_line.is_empty() {
+            current_line.push_str(word);
+        } else if current_line.len() + 1 + word.len() <= max_chars {
+            current_line.push(' ');
+            current_line.push_str(word);
+        } else {
+            lines.push(current_line);
+            current_line = word.to_string();
+        }
+    }
+    if !current_line.is_empty() {
+        lines.push(current_line);
+    }
+    lines
+}
+
 // ── Drawing primitives ────────────────────────────────────────────────────────
 
 fn fill_rect(ops: &mut Vec<Op>, x_mm: f32, y_top_svg_mm: f32, w_mm: f32, h_mm: f32, color: Color) {
@@ -302,10 +517,22 @@ fn fill_rect(ops: &mut Vec<Op>, x_mm: f32, y_top_svg_mm: f32, w_mm: f32, h_mm: f
         polygon: Polygon {
             rings: vec![PolygonRing {
                 points: vec![
-                    LinePoint { p: Point::new(Mm(x_mm),        Mm(y_bottom_pdf_mm)),        bezier: false },
-                    LinePoint { p: Point::new(Mm(x_mm + w_mm), Mm(y_bottom_pdf_mm)),        bezier: false },
-                    LinePoint { p: Point::new(Mm(x_mm + w_mm), Mm(y_bottom_pdf_mm + h_mm)), bezier: false },
-                    LinePoint { p: Point::new(Mm(x_mm),        Mm(y_bottom_pdf_mm + h_mm)), bezier: false },
+                    LinePoint {
+                        p: Point::new(Mm(x_mm), Mm(y_bottom_pdf_mm)),
+                        bezier: false,
+                    },
+                    LinePoint {
+                        p: Point::new(Mm(x_mm + w_mm), Mm(y_bottom_pdf_mm)),
+                        bezier: false,
+                    },
+                    LinePoint {
+                        p: Point::new(Mm(x_mm + w_mm), Mm(y_bottom_pdf_mm + h_mm)),
+                        bezier: false,
+                    },
+                    LinePoint {
+                        p: Point::new(Mm(x_mm), Mm(y_bottom_pdf_mm + h_mm)),
+                        bezier: false,
+                    },
                 ],
             }],
             mode: PaintMode::Fill,
@@ -318,8 +545,14 @@ fn draw_line(ops: &mut Vec<Op>, x1_mm: f32, y1_svg_mm: f32, x2_mm: f32, y2_svg_m
     ops.push(Op::DrawLine {
         line: Line {
             points: vec![
-                LinePoint { p: Point::new(Mm(x1_mm), Mm(PAGE_HEIGHT_MM - y1_svg_mm)), bezier: false },
-                LinePoint { p: Point::new(Mm(x2_mm), Mm(PAGE_HEIGHT_MM - y2_svg_mm)), bezier: false },
+                LinePoint {
+                    p: Point::new(Mm(x1_mm), Mm(PAGE_HEIGHT_MM - y1_svg_mm)),
+                    bezier: false,
+                },
+                LinePoint {
+                    p: Point::new(Mm(x2_mm), Mm(PAGE_HEIGHT_MM - y2_svg_mm)),
+                    bezier: false,
+                },
             ],
             is_closed: false,
         },
@@ -337,12 +570,19 @@ fn left_text(
     let y_pdf_mm = PAGE_HEIGHT_MM - baseline_svg_y_mm;
     let size_pt = size_mm * 72.0 / 25.4;
     ops.extend([
-        Op::SetFillColor { col: black() },
         Op::StartTextSection,
-        Op::SetTextCursor { pos: Point::new(Mm(x_mm), Mm(y_pdf_mm)) },
-        Op::SetFont { font: font.clone(), size: Pt(size_pt) },
+        Op::SetFillColor { col: black() },
+        Op::SetFont {
+            font: font.clone(),
+            size: Pt(size_pt),
+        },
         Op::SetLineHeight { lh: Pt(size_pt) },
-        Op::ShowText { items: vec![TextItem::Text(text.to_string())] },
+        Op::SetTextCursor {
+            pos: Point::new(Mm(x_mm), Mm(y_pdf_mm)),
+        },
+        Op::ShowText {
+            items: vec![TextItem::Text(text.to_string())],
+        },
         Op::EndTextSection,
     ]);
 }
@@ -361,9 +601,19 @@ fn centered_text(
 }
 
 fn black() -> Color {
-    Color::Rgb(Rgb { r: 0.0, g: 0.0, b: 0.0, icc_profile: None })
+    Color::Rgb(Rgb {
+        r: 0.0,
+        g: 0.0,
+        b: 0.0,
+        icc_profile: None,
+    })
 }
 
 fn gray(value: f32) -> Color {
-    Color::Rgb(Rgb { r: value, g: value, b: value, icc_profile: None })
+    Color::Rgb(Rgb {
+        r: value,
+        g: value,
+        b: value,
+        icc_profile: None,
+    })
 }
