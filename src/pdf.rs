@@ -7,12 +7,10 @@ use printpdf::{
 
 use crate::database::PurchaseOrderLine;
 
-const REGULAR_TTF: &[u8] = include_bytes!(
-    "../atkinson-hyperlegible-next-mono/fonts/ttf/AtkinsonHyperlegibleMono-Regular.ttf"
-);
-const BOLD_TTF: &[u8] = include_bytes!(
-    "../atkinson-hyperlegible-next-mono/fonts/ttf/AtkinsonHyperlegibleMono-Bold.ttf"
-);
+const REGULAR_TTF: &[u8] =
+    include_bytes!("../fonts/AtkinsonHyperlegibleMono-Regular.ttf");
+const BOLD_TTF: &[u8] =
+    include_bytes!("../fonts/AtkinsonHyperlegibleMono-Bold.ttf");
 const LOGO_PNG: &[u8] = include_bytes!("../fbr_logo.png");
 
 const PAGE_WIDTH_MM: f32 = 297.0;
