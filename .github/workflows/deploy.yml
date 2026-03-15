@@ -1,0 +1,52 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build-and-deploy:
+    runs-on: self-hosted
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-leptos
+        run: cargo install cargo-leptos --locked
+
+      - name: Build
+        run: cargo leptos build --release
+
+      - name: Write env file
+        shell: pwsh
+        env:
+          SAP_DB_HOST: ${{ secrets.SAP_DB_HOST }}
+          SAP_DB_PORT: ${{ secrets.SAP_DB_PORT }}
+          SAP_DB_USER: ${{ secrets.SAP_DB_USER }}
+          SAP_DB_PASSWORD: ${{ secrets.SAP_DB_PASSWORD }}
+          SAP_DB_NAME: ${{ secrets.SAP_DB_NAME }}
+        run: |
+          @(
+            "SAP_DB_HOST=$env:SAP_DB_HOST",
+            "SAP_DB_PORT=$env:SAP_DB_PORT",
+            "SAP_DB_USER=$env:SAP_DB_USER",
+            "SAP_DB_PASSWORD=$env:SAP_DB_PASSWORD",
+            "SAP_DB_NAME=$env:SAP_DB_NAME"
+          ) | Set-Content "C:\fbrmarble-tools\.env"
+
+      - name: Deploy
+        shell: pwsh
+        run: |
+          nssm stop fbrmarble-tools
+          if (Test-Path C:\fbrmarble-tools\site) {
+            Remove-Item -Recurse -Force C:\fbrmarble-tools\site
+          }
+          Copy-Item -Force target\release\server.exe C:\fbrmarble-tools\server.exe
+          Copy-Item -Recurse -Force target\site C:\fbrmarble-tools\site
+          nssm start fbrmarble-tools
